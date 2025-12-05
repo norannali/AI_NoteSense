@@ -1,7 +1,7 @@
 from providers.OpenRouterProvider import OpenRouterProvider
 import pdfplumber
 
-# استخدم نفس الـ LLM في كل عمليات التلخيص
+
 llm = OpenRouterProvider()
 
 def extract_pdf(path):

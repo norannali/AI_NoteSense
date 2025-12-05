@@ -1,66 +1,172 @@
 import streamlit as st
+import re
 from adaptive_engine.adaptive_engine import AdaptiveEngine
 from core_models.extractor import extract_pdf
-from core_models.pdf_summarizer import summarize_text
 from providers.OpenRouterProvider import OpenRouterProvider
+import graphviz
 
-llm = OpenRouterProvider()
+# --- Page Configuration ---
+st.set_page_config(page_title="AI NoteSense", layout="wide")
 
+# --- Load Core Engine & Models (Cached) ---
 @st.cache_resource
 def load_engine():
     return AdaptiveEngine()
 
 engine = load_engine()
+llm = OpenRouterProvider()
 
-st.set_page_config(page_title="AI Adaptive Tutor", layout="wide")
-st.title("🎓 AI Adaptive Tutor – Personalized Learning Engine")
+# --- Sidebar: Session Controls & User Settings ---
+with st.sidebar:
+    st.title("⚙️ Controls")
+    
+    # User Identification
+    user_id = st.text_input("User ID", value="student_01")
+    level = st.selectbox("Level", ["beginner", "intermediate", "advanced"])
+    
+    st.divider()
+    
+    # [NEW] Feature: AI Task Selection
+    task_mode = st.selectbox(
+        "🤖 AI Task Mode",
+        ["General Chat", "Summarize Document", "Explain Concept", "Explain Differently", "Visual Outline"]
+    )
+    
+    # Run Task Button
+    run_task = st.button("🚀 Run Task Now", type="primary")
+    
+    st.divider()
 
-user_id = st.text_input("👤 User ID", value="student_01")
-level = st.selectbox("📚 Student Level", ["beginner", "intermediate", "advanced"])
-engine.memory.set_user_level(user_id, level)
+    # Session History Control
+    if st.button("🗑️ Clear History"):
+        st.session_state.messages = []
+        st.session_state.topic = None
+        st.rerun()
 
-uploaded_pdf = st.file_uploader("📄 Upload Lecture PDF (optional)", type=["pdf"])
-question = st.text_area("💬 Enter your question or text")
+# --- Main Interface ---
+st.title("🎓 AI NoteSense – Intelligent Study Assistant")
 
-task = st.selectbox("✨ AI Task", ["Explain", "Summarize", "Explain Differently"])
+# Initialize Session State
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "topic" not in st.session_state:
+    st.session_state.topic = None
 
-if st.button("Generate Response"):
+# --- Feature 1: File Upload & Processing ---
+uploaded_pdf = st.file_uploader("📄 Upload Lecture PDF (Optional)", type=["pdf"])
+pdf_text = ""
 
-    lecture_summary = None
+if uploaded_pdf:
+    with st.spinner("Processing PDF..."):
+        pdf_text = extract_pdf(uploaded_pdf)
+        
+        # Feature 2: Auto Topic Detection
+        if not st.session_state.topic:
+            # We pass only the first 1000 chars to detect topic quickly
+            detected_topic = llm.detect_topic(pdf_text[:1000])
+            st.session_state.topic = detected_topic
+            st.success(f"📌 Detected Topic: {detected_topic}")
 
-    if uploaded_pdf:
-        with st.spinner("📄 Extracting PDF..."):
-            pdf_text = extract_pdf(uploaded_pdf)
+# --- Feature 7: Display Chat History ---
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if "visual" in msg:
+            st.graphviz_chart(msg["visual"])
 
-        with st.spinner("✨ Summarizing PDF..."):
-            lecture_summary = summarize_text(pdf_text)
+# --- Logic: Handle Input (Either from Chat OR Button) ---
 
-    # final input
-    if lecture_summary:
-        final_input = f"{question}\n\nRelated Lecture Summary:\n{lecture_summary}"
+# 1. Check Chat Input
+chat_input = st.chat_input("Type your question or request here...")
+
+# 2. Determine the Final Prompt
+final_prompt = None
+
+if chat_input:
+    # User typed a question manually
+    final_prompt = chat_input
+elif run_task:
+    # User clicked "Run Task Now"
+    # Create a default prompt based on the selected mode
+    if task_mode == "Summarize Document":
+        final_prompt = "Please summarize the uploaded document based on the context provided."
+    elif task_mode == "Visual Outline":
+        final_prompt = "Create a visual concept map for this document."
+    elif task_mode == "Explain Concept":
+        final_prompt = "Explain the main concepts in this document."
+    elif task_mode == "Explain Differently":
+        final_prompt = "Explain the content in 3 different ways (Simple, Example, Technical)."
     else:
-        final_input = question
+        final_prompt = "Hello AI, I'm ready to study."
 
-    with st.spinner("🤖 AI thinking..."):
+# --- Processing The Request ---
+if final_prompt:
+    
+    # 1. Append User Message to History
+    st.session_state.messages.append({"role": "user", "content": final_prompt})
+    with st.chat_message("user"):
+        st.markdown(final_prompt)
 
-        # main output (llm)
-        if task == "Summarize":
-            result_text = summarize_text(final_input)
-            mode = "summarize"
+    # 2. Prepare Context (Critical Step!)
+    # We combine the User Question + The File Content
+    context = pdf_text if pdf_text else ""
+    full_input = f"{final_prompt}\n\nContext:\n{context[:4000]}" # Passed 4000 chars of context
 
-        elif task == "Explain":
-            result_text = llm.explain(final_input, level)
-            mode = "explain"
+    # 3. Generate Response
+    with st.chat_message("assistant"):
+        with st.spinner(f"AI is running task: {task_mode}..."):
+            
+            # --- Handling Visual Outline Task ---
+            if task_mode == "Visual Outline" or "visual" in final_prompt.lower():
+                response_text = "Here is the visual concept map for your request:"
+                # Here we used full_input correctly
+                dot_code = llm.generate_visual_outline(full_input)
+                clean_dot = re.sub(r'```dot|```', '', dot_code).strip()
+                
+                try:
+                    st.graphviz_chart(clean_dot)
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": response_text, 
+                        "visual": clean_dot
+                    })
+                except Exception as e:
+                    st.error("Could not render chart. Raw code provided.")
+                    st.code(clean_dot)
+            
+            else:
+                # --- Mapping UI Task to Engine Mode ---
+                mode_map = {
+                    "General Chat": "answer",
+                    "Summarize Document": "summarize",
+                    "Explain Concept": "explain",
+                    "Explain Differently": "explain_differently"
+                }
+                
+                selected_engine_mode = mode_map.get(task_mode, "answer")
 
-        elif task == "Explain Differently":
-            result_text = llm.explain_differently(final_input)
-            mode = "explain_differently"
+                # [FIXED HERE] Passing 'full_input' instead of 'final_prompt'
+                # This ensures the AI sees the PDF context
+                processed = engine.process(user_id, full_input, level, mode=selected_engine_mode)
+                response_text = processed["response"]
+                
+                st.markdown(response_text)
+                
+                # Feature 9: Transparency & Metadata
+                with st.expander("🔍 Transparency & Metadata"):
+                    st.json(processed["metadata"])
+                    st.info(f"Task Mode: {task_mode} | Source: {uploaded_pdf.name if uploaded_pdf else 'Direct Input'}")
 
-        # metadata
-        meta = engine.process(user_id, final_input, level, mode=mode)
+                # Feature 11: Feedback
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("👍 Helpful"):
+                        engine.memory.update_user_level(user_id, 80)
+                        st.toast("Feedback recorded: Score increased!")
+                with col2:
+                    if st.button("👎 Not Helpful"):
+                        engine.memory.update_user_level(user_id, 20)
+                        st.toast("Feedback recorded: We will adjust the level.")
 
-    st.subheader("🧠 AI Response")
-    st.write(result_text)
-
-    st.subheader("📊 Metadata")
-    st.json(meta["metadata"])
+                # Save Response
+                st.session_state.messages.append({"role": "assistant", "content": response_text})
